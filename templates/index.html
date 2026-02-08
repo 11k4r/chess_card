@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Player Card Generator - Dual Eval</title>
+    
+    <script src="/static/tailwind.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Montserrat:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Montserrat', 'sans-serif'], display: ['Cinzel', 'serif'] },
+                    colors: {
+                        'chess-dark': '#0f0f13', 'chess-panel': '#1a1a20', 'chess-accent': '#3b82f6', 
+                        'chess-gold': '#fbbf24', 'card-bg': '#121212',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        .glass-panel { background: rgba(26, 26, 32, 0.9); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .theme-common { --primary-glow: rgba(59, 130, 246, 0.6); --border-gradient: linear-gradient(135deg, #3b82f6 0%, #60a5fa 50%, #2563eb 100%); --text-accent: #60a5fa; --bg-gradient: linear-gradient(160deg, #1e293b 0%, #0f172a 100%); --hex-border: #3b82f6; }
+        .theme-titled { --primary-glow: rgba(251, 191, 36, 0.6); --border-gradient: linear-gradient(135deg, #b45309 0%, #fbbf24 50%, #fcd34d 100%); --text-accent: #fcd34d; --bg-gradient: linear-gradient(160deg, #451a03 0%, #1a0f0a 100%); --hex-border: #fbbf24; }
+        .theme-gm { --primary-glow: rgba(167, 139, 250, 0.6); --border-gradient: linear-gradient(135deg, #7c3aed 0%, #a78bfa 50%, #8b5cf6 100%); --text-accent: #a78bfa; --bg-gradient: linear-gradient(160deg, #2e1065 0%, #020617 100%); --hex-border: #c4b5fd; }
+        .royal-shape { clip-path: polygon(25px 0, calc(100% - 25px) 0, 100% 25px, 100% calc(100% - 25px), calc(100% - 25px) 100%, 25px 100%, 0 calc(100% - 25px), 0 25px); }
+        #player-card { width: 400px; height: 680px; position: relative; background: var(--border-gradient); padding: 4px; box-shadow: 0 0 50px var(--primary-glow); transition: all 0.5s ease; }
+        .card-inner-content { width: 100%; height: 100%; background: var(--bg-gradient); position: relative; overflow: hidden; }
+        .bg-pattern { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-image: radial-gradient(circle at 50% 50%, rgba(255,255,255,0.05) 1px, transparent 1px); background-size: 20px 20px; opacity: 0.5; z-index: 0; }
+        .hex-wrapper { width: 140px; height: 140px; clip-path: polygon(50% 0%, 95% 25%, 95% 75%, 50% 100%, 5% 75%, 5% 25%); background: var(--hex-border); padding: 3px; margin: 0 auto; position: relative; z-index: 10; box-shadow: 0 0 30px var(--primary-glow); }
+        .hex-inner { width: 100%; height: 100%; background: #000; clip-path: polygon(50% 0%, 95% 25%, 95% 75%, 50% 100%, 5% 75%, 5% 25%); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        .hex-inner img { width: 100%; height: 100%; object-fit: cover; }
+        .metric-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+        .metric-name { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: rgba(255,255,255,0.9); width: 40px; text-align: left; padding-right: 4px; }
+        .metric-bar-bg { flex-grow: 1; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden; }
+        .metric-bar-fill { height: 100%; background: var(--text-accent); width: 0%; transition: width 1s ease-out; box-shadow: 0 0 5px var(--text-accent); }
+        .metric-value { font-size: 0.7rem; font-weight: 700; color: white; width: 25px; text-align: right; padding-left: 5px; }
+        .loader { border: 3px solid rgba(255,255,255,0.1); border-top: 3px solid #3b82f6; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .royal-decor-top { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 80%; height: 1px; background: linear-gradient(90deg, transparent, var(--text-accent), transparent); z-index: 5; }
+        .royal-decor-bottom { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); width: 80%; height: 1px; background: linear-gradient(90deg, transparent, var(--text-accent), transparent); z-index: 5; }
+    </style>
+</head>
+<body class="bg-chess-dark text-gray-200 min-h-screen font-sans selection:bg-blue-500 selection:text-white flex items-center justify-center p-4">
+
+    <div id="toast" class="fixed top-5 left-1/2 transform -translate-x-1/2 bg-red-600 text-white px-6 py-3 rounded-lg shadow-xl z-50 hidden transition-opacity duration-300">
+        <i class="fas fa-exclamation-triangle mr-2"></i>
+        <span id="toast-msg">Error message here</span>
+    </div>
+
+    <div class="container max-w-6xl mx-auto flex flex-col lg:flex-row gap-8 items-start justify-center">
+
+        <div class="w-full lg:w-1/3 glass-panel p-6 rounded-2xl shadow-2xl flex flex-col gap-6 relative z-20">
+            <div class="flex items-center gap-3 border-b border-gray-700 pb-4">
+                <i class="fas fa-chess-knight text-3xl text-blue-500"></i>
+                <div>
+                    <h1 class="text-xl font-display font-bold text-white">Card Generator</h1>
+                    <p class="text-xs text-gray-400">Powered by Chess.com & Stockfish</p>
+                </div>
+            </div>
+
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Chess.com Username</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="usernameInput" placeholder="e.g. Hikaru" 
+                            class="w-full bg-black/40 border border-gray-700 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors text-white text-sm placeholder-gray-600">
+                        <button onclick="startProcess()" id="searchBtn" 
+                            class="bg-blue-600 hover:bg-blue-700 text-white px-5 rounded-lg font-bold transition-all shadow-lg hover:shadow-blue-500/30 flex items-center justify-center">
+                            <i class="fas fa-search"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="progress-container" class="hidden w-full bg-gray-700 rounded-full h-2.5 mt-4">
+                    <div id="progress-bar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+                    <p id="progress-text" class="text-xs text-center mt-1 text-gray-400">0 / 100 Games Analyzed</p>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Custom Image</label>
+                    <label class="flex items-center gap-3 w-full bg-black/40 border border-gray-700 border-dashed rounded-lg px-4 py-3 cursor-pointer hover:border-blue-500/50 hover:bg-black/60 transition-all group">
+                        <div class="w-8 h-8 rounded-full bg-gray-800 flex items-center justify-center group-hover:bg-blue-600 transition-colors">
+                            <i class="fas fa-camera text-gray-400 group-hover:text-white text-xs"></i>
+                        </div>
+                        <div class="flex flex-col">
+                            <span class="text-sm text-gray-300 font-medium">Upload File</span>
+                            <span class="text-[10px] text-gray-500">Supports JPG, PNG</span>
+                        </div>
+                        <input type="file" id="imageUpload" accept="image/*" class="hidden" onchange="handleImageUpload(this)">
+                    </label>
+                </div>
+
+                <div class="pt-4 border-t border-gray-700">
+                    <button onclick="downloadCard()" id="downloadBtn" disabled
+                        class="w-full bg-gray-800 hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed text-white py-3 rounded-lg font-bold transition-all flex items-center justify-center gap-2 group">
+                        <i class="fas fa-download group-hover:animate-bounce"></i> Download Card
+                    </button>
+                </div>
+            </div>
+
+            <div class="bg-blue-900/10 border border-blue-500/20 p-4 rounded-lg">
+                <div class="flex gap-3">
+                    <i class="fas fa-info-circle text-blue-400 mt-1"></i>
+                    <div class="text-xs text-blue-200/80 leading-relaxed">
+                        <p class="mb-2"><strong>Dual Analysis:</strong> This tool runs both Classical and NNUE evaluations for maximum accuracy.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="w-full lg:w-auto flex justify-center perspective-1000">
+            <div id="player-card" class="theme-common royal-shape select-none">
+                <div class="card-inner-content royal-shape">
+                    <div class="bg-pattern"></div>
+                    <div class="royal-decor-top"></div>
+                    <div class="royal-decor-bottom"></div>
+                    <div class="absolute top-2 left-2 w-8 h-8 border-t border-l border-[var(--text-accent)] opacity-30"></div>
+                    <div class="absolute top-2 right-2 w-8 h-8 border-t border-r border-[var(--text-accent)] opacity-30"></div>
+                    <div class="absolute bottom-2 left-2 w-8 h-8 border-b border-l border-[var(--text-accent)] opacity-30"></div>
+                    <div class="absolute bottom-2 right-2 w-8 h-8 border-b border-r border-[var(--text-accent)] opacity-30"></div>
+
+                    <div class="relative z-10 pt-12 px-6 text-center">
+                        <div class="absolute top-10 left-8 flex flex-col items-center">
+                            <span class="text-[9px] tracking-[0.2em] font-bold text-gray-400 uppercase">OVR</span>
+                            <span id="overall-score" class="text-4xl font-display font-black text-[var(--text-accent)] leading-none drop-shadow-lg">--</span>
+                        </div>
+                        <div class="absolute top-10 right-8 flex flex-col items-center">
+                            <img id="country-flag" src="/proxy_image?url=https://flagcdn.com/w40/un.png" class="w-8 rounded shadow-md opacity-80" alt="Flag">
+                        </div>
+                        <div class="hex-wrapper mb-4 transition-transform duration-500 hover:scale-105">
+                            <div class="hex-inner">
+                                <img id="player-img" src="/proxy_image?url=https://www.chess.com/bundles/web/images/user-image.svg" alt="Player">
+                            </div>
+                        </div>
+                        <div id="title-badge" class="hidden inline-block bg-[var(--hex-border)] text-black font-black text-xs px-2 py-0.5 rounded shadow-lg mb-2 uppercase tracking-wide transform -skew-x-12">GM</div>
+                        <h2 id="player-username" class="text-3xl font-display font-black text-white tracking-widest truncate px-2 drop-shadow-md uppercase mt-1">USERNAME</h2>
+                        <p id="player-description" class="text-sm font-display font-bold text-[var(--text-accent)] uppercase tracking-widest mt-2 px-4 py-1 border-t border-b border-[var(--text-accent)] inline-block opacity-90 bg-black/30">Player Style</p>
+                    </div>
+
+                    <div class="relative z-10 grid grid-cols-3 gap-2 px-6 py-6 mt-1">
+                        <div class="text-center p-2 bg-white/5 backdrop-blur-sm border-t border-b border-white/10">
+                            <div class="text-[9px] text-gray-400 uppercase tracking-wider mb-1">Rapid</div>
+                            <div id="rating-rapid" class="text-lg font-bold text-[var(--text-accent)]">---</div>
+                        </div>
+                        <div class="text-center p-2 bg-white/5 backdrop-blur-sm border-t border-b border-white/10">
+                            <div class="text-[9px] text-gray-400 uppercase tracking-wider mb-1">Blitz</div>
+                            <div id="rating-blitz" class="text-lg font-bold text-[var(--text-accent)]">---</div>
+                        </div>
+                        <div class="text-center p-2 bg-white/5 backdrop-blur-sm border-t border-b border-white/10">
+                            <div class="text-[9px] text-gray-400 uppercase tracking-wider mb-1">Bullet</div>
+                            <div id="rating-bullet" class="text-lg font-bold text-[var(--text-accent)]">---</div>
+                        </div>
+                    </div>
+
+                    <div class="relative z-10 px-6 pb-6">
+                        <div id="metrics-container" class="grid grid-cols-2 gap-x-6 gap-y-1 mt-6"></div>
+                    </div>
+
+                    <div class="absolute bottom-2 w-full text-center z-10">
+                        <img src="/static/images/circle_logo.png" class="h-16 mx-auto opacity-90" alt="Logo">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    
+    // --- WORKER CREATION (Robust Blob Method) ---
+    function createStockfishWorker() {
+        const baseUrl = new URL('/static/package/', window.location.href).href;
+        const scriptUrl = baseUrl + 'stockfish.js'; // Ensure this file supports NNUE!
+
+        const workerSource = `
+            var Module = {
+                locateFile: function(path) {
+                    if (path.indexOf('http') === 0) return path;
+                    return '${baseUrl}' + path;
+                },
+                mainScriptUrlOrBlob: '${scriptUrl}'
+            };
+
+            var pendingMessages = [];
+            var engineInstance = null;
+
+            self.onmessage = function(event) {
+                if (engineInstance) {
+                    engineInstance.postMessage(event.data);
+                } else {
+                    pendingMessages.push(event.data);
+                }
+            };
+
+            importScripts('${scriptUrl}');
+
+            Stockfish(Module).then(sf => {
+                engineInstance = sf;
+                sf.addMessageListener(function(line) {
+                    self.postMessage(line);
+                });
+                while (pendingMessages.length > 0) {
+                    sf.postMessage(pendingMessages.shift());
+                }
+            }).catch(err => {
+                console.error("Worker Critical Error:", err);
+            });
+        `;
+
+        const blob = new Blob([workerSource], { type: 'application/javascript' });
+        return new Worker(URL.createObjectURL(blob));
+    }
+    
+    // --- Configuration ---
+    const SEARCH_DEPTH = 4; 
+    
+    // --- State ---
+    let isAnalyzing = false;
+    let currentUsername = "";
+    
+    const threadCount = navigator.hardwareConcurrency || 4;
+    let workerPool = []; 
+
+    // --- UI Helpers ---
+    const proxy = (url) => `/proxy_image?url=${encodeURIComponent(url)}`;
+
+    function showToast(msg) {
+        const t = document.getElementById('toast');
+        document.getElementById('toast-msg').innerText = msg;
+        t.classList.remove('hidden');
+        setTimeout(() => t.classList.add('hidden'), 4000);
+    }
+
+    function updateProgressBar(processed, total) {
+        const container = document.getElementById('progress-container');
+        const bar = document.getElementById('progress-bar');
+        const text = document.getElementById('progress-text');
+        
+        container.classList.remove('hidden');
+        const pct = (processed / total) * 100;
+        bar.style.width = `${pct}%`;
+        text.innerText = `Analyzed ${processed} / ${total} games...`;
+    }
+
+    // --- Core Logic ---
+
+    async function startProcess() {
+        const usernameInput = document.getElementById('usernameInput');
+        currentUsername = usernameInput.value.trim();
+        const btn = document.getElementById('searchBtn');
+
+        if (!currentUsername) return;
+
+        btn.disabled = true;
+        btn.innerHTML = '<div class="loader w-4 h-4"></div>';
+        
+        try {
+            // 1. Initialize Session
+            const initResp = await fetch('/api/init_session', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: currentUsername })
+            });
+            
+            if (!initResp.ok) throw new Error("Player not found or Server Error");
+            const profileData = await initResp.json();
+            updateCardUI(profileData);
+
+            // 2. Fetch Games
+            const games = await fetchLast100Games(currentUsername);
+            
+            if (games.length < 100) {
+                showToast(`User has only ${games.length} games. 100 required.`);
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-search"></i>';
+                return;
+            }
+
+            // 3. Initialize Worker Pool (One Time)
+            if (workerPool.length === 0) {
+                console.log(`Initializing pool with ${threadCount} workers...`);
+                for (let i = 0; i < threadCount; i++) {
+                    const w = createStockfishWorker(); 
+                    w.postMessage('uci');
+                    w.postMessage('setoption name Threads value 1'); 
+                    w.postMessage('setoption name Hash value 16');
+                    w.postMessage('setoption name MultiPV value 3'); 
+                    workerPool.push(w);
+                }
+            }
+
+            // 4. Start Parallel Analysis
+            await processGamesInParallel(games);
+
+            document.getElementById('progress-text').innerText = "Analysis Complete!";
+            document.getElementById('downloadBtn').disabled = false;
+
+        } catch (error) {
+            console.error(error);
+            showToast(error.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-search"></i>';
+        }
+    }
+
+    async function fetchLast100Games(username) {
+        const archivesResp = await fetch(`https://api.chess.com/pub/player/${username}/games/archives`);
+        const archivesData = await archivesResp.json();
+        const archives = archivesData.archives.reverse(); 
+
+        let allGames = [];
+        for (const url of archives) {
+            if (allGames.length >= 100) break;
+            const resp = await fetch(url);
+            const data = await resp.json();
+            allGames = allGames.concat(data.games.reverse()); 
+        }
+        return allGames.slice(0, 100);
+    }
+
+    // --- PARALLEL PROCESSING ENGINE ---
+    
+    async function processGamesInParallel(games) {
+        let gamesQueue = [...games]; 
+        let gamesCompleted = 0;
+        let totalGames = games.length;
+
+        const workerTask = async (worker) => {
+            while (gamesQueue.length > 0) {
+                const gameIndex = totalGames - gamesQueue.length;
+                const game = gamesQueue.shift(); 
+                
+                if (!game) break; 
+
+                // Analyze (Returns Dual Data)
+                const analysisData = await analyzeGameDualMode(game.pgn, worker);
+
+                const payload = {
+                    username: currentUsername,
+                    pgn: game.pgn,
+                    analysis: analysisData,
+                    is_final: (gamesCompleted === totalGames - 1)
+                };
+
+                const resp = await fetch('/api/process_game_result', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                const updatedCardData = await resp.json();
+                
+                gamesCompleted++;
+                updateProgressBar(gamesCompleted, totalGames);
+                updateCardMetrics(updatedCardData);
+            }
+        };
+
+        await Promise.all(workerPool.map(w => workerTask(w)));
+    }
+
+    // --- DUAL MODE ANALYSIS: Trace + Top 3 Lines + Played Eval ---
+function analyzeGameDualMode(pgn, worker) {
+    return new Promise((resolve) => {
+        const chess = new Chess();
+        if (!chess.load_pgn(pgn)) { resolve([]); return; }
+
+        const history = chess.history({ verbose: true });
+        let analysisData = []; 
+        let currentMoveIndex = 0;
+        
+        // Phases: 'classical' -> 'nnue_best' (Top 3) -> 'nnue_played' (Actual Move)
+        let searchPhase = 'classical'; 
+        
+        // Temp storage for data across phases
+        let currentClassicalTrace = null;
+        let currentTopLines = [];
+
+        // Helper to clean worker state
+        worker.currentLines = {};
+        worker.traceBuffer = ""; 
+
+        const processNextStep = () => {
+            if (currentMoveIndex >= history.length) {
+                worker.onmessage = null; 
+                resolve(analysisData);
+                return;
+            }
+            
+            // Reset worker capture containers
+            worker.currentLines = {}; 
+            worker.traceBuffer = ""; 
+
+            // 1. Determine Turn & Perspective
+            const isWhiteTurn = (currentMoveIndex % 2 === 0);
+            worker.currentPerspective = isWhiteTurn ? 1 : -1;
+
+            // 2. Construct Position Strings
+            let movesString = "position startpos moves";
+            for(let j=0; j < currentMoveIndex; j++) { 
+                const m = history[j];
+                movesString += " " + m.from + m.to + (m.promotion || '');
+            }
+
+            const playedMoveObj = history[currentMoveIndex];
+            const playedMoveLAN = playedMoveObj.from + playedMoveObj.to + (playedMoveObj.promotion || '');
+            worker.currentPlayedMoveLAN = playedMoveLAN;
+
+            // 3. Execute Phase Logic
+            if (searchPhase === 'classical') {
+                // --- PHASE 1: CLASSICAL TRACE ---
+                worker.postMessage('setoption name Use NNUE value false');
+                worker.postMessage(movesString);
+                worker.postMessage('eval'); 
+                worker.postMessage('go nodes 1'); // Dummy search to trigger 'bestmove'
+
+            } else if (searchPhase === 'nnue_best') {
+                // --- PHASE 2: NNUE TOP 3 LINES ---
+                worker.postMessage('setoption name Use NNUE value true');
+                worker.postMessage('setoption name MultiPV value 3'); // Look for top 3
+                worker.postMessage(movesString);
+                worker.postMessage(`go depth ${SEARCH_DEPTH}`); // Search ALL moves
+
+            } else if (searchPhase === 'nnue_played') {
+                // --- PHASE 3: NNUE PLAYED MOVE ---
+                worker.postMessage('setoption name MultiPV value 1'); // Reset to single line
+                worker.postMessage(movesString);
+                // Restrict search ONLY to the played move to get its specific score
+                worker.postMessage(`go depth ${SEARCH_DEPTH} searchmoves ${playedMoveLAN}`); 
+            }
+        };
+
+        worker.onmessage = (e) => {
+            const msg = e.data;
+            
+            // 1. Capture Classical Trace (Non-standard lines)
+            if (searchPhase === 'classical') {
+                if (!msg.startsWith('info') && !msg.startsWith('bestmove') && !msg.startsWith('option')) {
+                    worker.traceBuffer += msg + "\n";
+                }
+            }
+
+            // 2. Parse Scores (Standard UCI)
+            if (msg.startsWith('info') && msg.includes('score') && msg.includes('pv')) {
+                let multipv = 1;
+                const pvMatch = msg.match(/multipv (\d+)/);
+                if (pvMatch) multipv = parseInt(pvMatch[1]);
+
+                let score = 0;
+                if(msg.includes('cp')) {
+                    const match = msg.match(/cp (-?\d+)/);
+                    if(match) score = parseInt(match[1]);
+                } else if (msg.includes('mate')) {
+                    const match = msg.match(/mate (-?\d+)/);
+                    if(match) score = parseInt(match[1]) > 0 ? 2000 : -2000;
+                }
+
+                // Adjust for perspective so it's always "Player's Advantage"
+                score = score * worker.currentPerspective;
+
+                // Extract the move string (LAN)
+                const pvIndex = msg.indexOf(' pv ');
+                let bestMoveLan = "";
+                if (pvIndex !== -1) {
+                     bestMoveLan = msg.substring(pvIndex + 4).split(' ')[0];
+                }
+
+                if (!worker.currentLines) worker.currentLines = {};
+                worker.currentLines[multipv] = {
+                    rank: multipv,
+                    score: score,
+                    move: bestMoveLan
+                };
+            }
+            
+            // 3. Handle End of Search
+            if (msg.startsWith('bestmove')) {
+                
+                if (searchPhase === 'classical') {
+                    // Save Trace -> Go to NNUE Best
+                    currentClassicalTrace = worker.traceBuffer;
+                    searchPhase = 'nnue_best';
+                    processNextStep();
+
+                } else if (searchPhase === 'nnue_best') {
+                    // Save Top 3 Lines -> Go to NNUE Played
+                    currentTopLines = Object.values(worker.currentLines || [])
+                        .sort((a,b) => a.rank - b.rank) // Ensure order 1, 2, 3
+                        .slice(0, 3); // Safety clip
+
+                    searchPhase = 'nnue_played';
+                    processNextStep();
+
+                } else if (searchPhase === 'nnue_played') {
+                    // Save Played Score -> Commit Data -> Next Move
+                    const lines = Object.values(worker.currentLines || {});
+                    const playedScore = (lines.length > 0) ? lines[0].score : null;
+
+                    analysisData.push({
+                        move_number: currentMoveIndex + 1,
+                        played_move: worker.currentPlayedMoveLAN,
+                        played_eval: playedScore,          // REQUIREMENT 1
+                        top_lines: currentTopLines,        // REQUIREMENT 2
+                        static_trace: currentClassicalTrace // TRACE
+                    });
+
+                    // Reset variables for next move
+                    searchPhase = 'classical';
+                    currentClassicalTrace = null;
+                    currentTopLines = [];
+                    currentMoveIndex++;
+                    processNextStep();
+                }
+            }
+        };
+
+        processNextStep();
+    });
+}
+
+    // --- UI Updaters (Standard) ---
+
+    function updateCardUI(data) {
+        const card = document.getElementById('player-card');
+        card.className = `royal-shape select-none theme-${data.theme}`;
+        document.getElementById('overall-score').innerText = data.overall;
+        document.getElementById('player-username').innerText = data.username;
+        
+        const img = document.getElementById('player-img');
+        if (!img.getAttribute('data-custom')) img.src = proxy(data.avatar);
+
+        const rawFlagUrl = data.country_code !== 'xx' 
+            ? `https://flagcdn.com/w40/${data.country_code.toLowerCase()}.png`
+            : 'https://flagcdn.com/w40/un.png';
+        document.getElementById('country-flag').src = proxy(rawFlagUrl);
+
+        const badge = document.getElementById('title-badge');
+        if (data.title) {
+            badge.innerText = data.title;
+            badge.classList.remove('hidden');
+            badge.classList.add('inline-block');
+        } else {
+            badge.classList.add('hidden');
+        }
+        document.getElementById('rating-rapid').innerText = data.ratings.rapid;
+        document.getElementById('rating-blitz').innerText = data.ratings.blitz;
+        document.getElementById('rating-bullet').innerText = data.ratings.bullet;
+    }
+
+    function updateCardMetrics(data) {
+        document.getElementById('overall-score').innerText = data.overall;
+        if(data.description) document.getElementById('player-description').innerText = data.description;
+
+        const container = document.getElementById('metrics-container');
+        container.innerHTML = ''; 
+        
+        Object.entries(data.metrics).forEach(([key, value]) => {
+            const row = document.createElement('div');
+            row.className = 'metric-row';
+            row.innerHTML = `
+                <span class="metric-name">${key}</span>
+                <div class="metric-bar-bg"><div class="metric-bar-fill" style="width: ${value}%"></div></div>
+                <span class="metric-value">${value}</span>
+            `;
+            container.appendChild(row);
+        });
+    }
+
+    function handleImageUpload(input) {
+        if (input.files && input.files[0]) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = document.getElementById('player-img');
+                img.src = e.target.result;
+                img.setAttribute('data-custom', 'true');
+            }
+            reader.readAsDataURL(input.files[0]);
+        }
+    }
+
+    function downloadCard() {
+        const card = document.getElementById('player-card');
+        const originalTransform = card.style.transform;
+        card.style.transform = 'none';
+        card.style.boxShadow = 'none';
+
+        html2canvas(card, {
+            scale: 2, backgroundColor: null, useCORS: true, allowTaint: true
+        }).then(canvas => {
+            const link = document.createElement('a');
+            link.download = `chess-card-${document.getElementById('player-username').innerText}.png`;
+            link.href = canvas.toDataURL();
+            link.click();
+            card.style.transform = originalTransform;
+            card.style.boxShadow = '';
+        });
+    }
+    </script>
+</body>
+</html>
