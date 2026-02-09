@@ -173,11 +173,17 @@
     </div>
 
     <script>
+    // --- CONFIGURATION ---
+    const SEARCH_DEPTH = 4;
+    const THREAD_COUNT = navigator.hardwareConcurrency || 4;
     
-    // --- WORKER CREATION (Robust Blob Method) ---
+    // --- STATE MANAGEMENT ---
+    let workerPool = [];
+
+    // --- WORKER FACTORY ---
     function createStockfishWorker() {
         const baseUrl = new URL('/static/package/', window.location.href).href;
-        const scriptUrl = baseUrl + 'stockfish.js'; // Ensure this file supports NNUE!
+        const scriptUrl = baseUrl + 'stockfish.js'; 
 
         const workerSource = `
             var Module = {
@@ -187,7 +193,7 @@
                 },
                 mainScriptUrlOrBlob: '${scriptUrl}'
             };
-
+            
             var pendingMessages = [];
             var engineInstance = null;
 
@@ -210,32 +216,25 @@
                     sf.postMessage(pendingMessages.shift());
                 }
             }).catch(err => {
-                console.error("Worker Critical Error:", err);
+                console.error("Worker Error:", err);
             });
         `;
 
         const blob = new Blob([workerSource], { type: 'application/javascript' });
         return new Worker(URL.createObjectURL(blob));
     }
-    
-    // --- Configuration ---
-    const SEARCH_DEPTH = 4; 
-    
-    // --- State ---
-    let isAnalyzing = false;
-    let currentUsername = "";
-    
-    const threadCount = navigator.hardwareConcurrency || 4;
-    let workerPool = []; 
 
-    // --- UI Helpers ---
+    // --- UI HELPERS ---
     const proxy = (url) => `/proxy_image?url=${encodeURIComponent(url)}`;
 
     function showToast(msg) {
         const t = document.getElementById('toast');
-        document.getElementById('toast-msg').innerText = msg;
-        t.classList.remove('hidden');
-        setTimeout(() => t.classList.add('hidden'), 4000);
+        const msgEl = document.getElementById('toast-msg');
+        if (t && msgEl) {
+            msgEl.textContent = msg;
+            t.classList.remove('hidden');
+            setTimeout(() => t.classList.add('hidden'), 4000);
+        }
     }
 
     function updateProgressBar(processed, total) {
@@ -243,24 +242,31 @@
         const bar = document.getElementById('progress-bar');
         const text = document.getElementById('progress-text');
         
-        container.classList.remove('hidden');
-        const pct = (processed / total) * 100;
-        bar.style.width = `${pct}%`;
-        text.innerText = `Analyzed ${processed} / ${total} games...`;
+        if (container && bar && text) {
+            container.classList.remove('hidden');
+            const pct = (processed / total) * 100;
+            bar.style.width = `${pct}%`;
+            text.textContent = `Analyzed ${processed} / ${total} games...`;
+        }
     }
 
-    // --- Core Logic ---
+    // --- CORE PROCESS ---
 
     async function startProcess() {
         const usernameInput = document.getElementById('usernameInput');
-        currentUsername = usernameInput.value.trim();
+        const currentUsername = usernameInput.value.trim();
         const btn = document.getElementById('searchBtn');
 
-        if (!currentUsername) return;
+        if (!currentUsername) {
+            showToast("Please enter a username");
+            return;
+        }
 
-        btn.disabled = true;
-        btn.innerHTML = '<div class="loader w-4 h-4"></div>';
-        
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loader w-4 h-4"></div>';
+        }
+
         try {
             // 1. Initialize Session
             const initResp = await fetch('/api/init_session', {
@@ -268,25 +274,19 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username: currentUsername })
             });
-            
-            if (!initResp.ok) throw new Error("Player not found or Server Error");
+
+            if (!initResp.ok) throw new Error("Player not found or Service Unavailable");
             const profileData = await initResp.json();
             updateCardUI(profileData);
 
             // 2. Fetch Games
             const games = await fetchLast100Games(currentUsername);
-            
-            if (games.length < 100) {
-                showToast(`User has only ${games.length} games. 100 required.`);
-                btn.disabled = false;
-                btn.innerHTML = '<i class="fas fa-search"></i>';
-                return;
-            }
+            if (games.length === 0) throw new Error("No games found for this user.");
 
-            // 3. Initialize Worker Pool (One Time)
+            // 3. Initialize Workers
             if (workerPool.length === 0) {
-                console.log(`Initializing pool with ${threadCount} workers...`);
-                for (let i = 0; i < threadCount; i++) {
+                console.log(`Initializing pool with ${THREAD_COUNT} workers...`);
+                for (let i = 0; i < THREAD_COUNT; i++) {
                     const w = createStockfishWorker(); 
                     w.postMessage('uci');
                     w.postMessage('setoption name Threads value 1'); 
@@ -296,280 +296,295 @@
                 }
             }
 
-            // 4. Start Parallel Analysis
-            await processGamesInParallel(games);
+            // 4. Start Parallel Analysis (Wait for ALL to complete)
+            await processGamesInParallel(games, currentUsername);
 
-            document.getElementById('progress-text').innerText = "Analysis Complete!";
-            document.getElementById('downloadBtn').disabled = false;
+            // 5. Finalize Session (The Fix)
+            const finalResp = await fetch('/api/finalize_session', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: currentUsername })
+            });
+
+            if (finalResp.ok) {
+                const finalData = await finalResp.json();
+                updateCardMetrics(finalData); // Updates description to final title
+            }
+
+            // Cleanup UI
+            const progressText = document.getElementById('progress-text');
+            if (progressText) progressText.textContent = "Analysis Complete!";
+            const dlBtn = document.getElementById('downloadBtn');
+            if (dlBtn) dlBtn.disabled = false;
 
         } catch (error) {
             console.error(error);
-            showToast(error.message);
+            showToast(error.message || "An unexpected error occurred");
         } finally {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="fas fa-search"></i>';
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-search"></i>';
+            }
         }
     }
 
     async function fetchLast100Games(username) {
-        const archivesResp = await fetch(`https://api.chess.com/pub/player/${username}/games/archives`);
-        const archivesData = await archivesResp.json();
-        const archives = archivesData.archives.reverse(); 
+        try {
+            const archivesResp = await fetch(`https://api.chess.com/pub/player/${username}/games/archives`);
+            if (!archivesResp.ok) throw new Error("Failed to fetch archives");
+            const archivesData = await archivesResp.json();
+            const archives = archivesData.archives.reverse(); 
 
-        let allGames = [];
-        for (const url of archives) {
-            if (allGames.length >= 100) break;
-            const resp = await fetch(url);
-            const data = await resp.json();
-            allGames = allGames.concat(data.games.reverse()); 
+            let allGames = [];
+            for (const url of archives) {
+                if (allGames.length >= 100) break;
+                const resp = await fetch(url);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    allGames = allGames.concat(data.games.reverse());
+                }
+            }
+            return allGames.slice(0, 100);
+        } catch (e) {
+            console.error("Game fetch error:", e);
+            throw e;
         }
-        return allGames.slice(0, 100);
     }
 
-    // --- PARALLEL PROCESSING ENGINE ---
-    
-    async function processGamesInParallel(games) {
+    async function processGamesInParallel(games, username) {
         let gamesQueue = [...games]; 
         let gamesCompleted = 0;
         let totalGames = games.length;
 
         const workerTask = async (worker) => {
             while (gamesQueue.length > 0) {
-                const gameIndex = totalGames - gamesQueue.length;
                 const game = gamesQueue.shift(); 
-                
                 if (!game) break; 
 
-                // Analyze (Returns Dual Data)
-                const analysisData = await analyzeGameDualMode(game.pgn, worker);
+                try {
+                    const analysisData = await analyzeGameDualMode(game.pgn, worker);
+                    
+                    // Note: No 'is_final' flag here anymore
+                    const payload = {
+                        username: username,
+                        pgn: game.pgn,
+                        analysis: analysisData
+                    };
 
-                const payload = {
-                    username: currentUsername,
-                    pgn: game.pgn,
-                    analysis: analysisData,
-                    is_final: (gamesCompleted === totalGames - 1)
-                };
-
-                const resp = await fetch('/api/process_game_result', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                
-                const updatedCardData = await resp.json();
-                
-                gamesCompleted++;
-                updateProgressBar(gamesCompleted, totalGames);
-                updateCardMetrics(updatedCardData);
+                    const resp = await fetch('/api/process_game_result', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    if (resp.ok) {
+                        const updatedCardData = await resp.json();
+                        updateCardMetrics(updatedCardData);
+                    }
+                } catch (err) {
+                    console.warn("Skipping game error:", err);
+                } finally {
+                    gamesCompleted++;
+                    updateProgressBar(gamesCompleted, totalGames);
+                }
             }
         };
 
         await Promise.all(workerPool.map(w => workerTask(w)));
     }
 
-    // --- DUAL MODE ANALYSIS: Trace + Top 3 Lines + Played Eval ---
-function analyzeGameDualMode(pgn, worker) {
-    return new Promise((resolve) => {
-        const chess = new Chess();
-        if (!chess.load_pgn(pgn)) { resolve([]); return; }
+    function analyzeGameDualMode(pgn, worker) {
+        return new Promise((resolve) => {
+            const chess = new Chess();
+            try {
+                if (!chess.load_pgn(pgn)) { resolve([]); return; }
+            } catch (e) { resolve([]); return; }
 
-        const history = chess.history({ verbose: true });
-        let analysisData = []; 
-        let currentMoveIndex = 0;
-        
-        // Phases: 'classical' -> 'nnue_best' (Top 3) -> 'nnue_played' (Actual Move)
-        let searchPhase = 'classical'; 
-        
-        // Temp storage for data across phases
-        let currentClassicalTrace = null;
-        let currentTopLines = [];
+            const history = chess.history({ verbose: true });
+            let analysisData = []; 
+            let currentMoveIndex = 0;
+            let searchPhase = 'classical'; 
+            let currentClassicalTrace = null;
+            let currentTopLines = [];
 
-        // Helper to clean worker state
-        worker.currentLines = {};
-        worker.traceBuffer = ""; 
-
-        const processNextStep = () => {
-            if (currentMoveIndex >= history.length) {
-                worker.onmessage = null; 
-                resolve(analysisData);
-                return;
-            }
-            
-            // Reset worker capture containers
-            worker.currentLines = {}; 
+            // Reset
+            worker.currentLines = {};
             worker.traceBuffer = ""; 
 
-            // 1. Determine Turn & Perspective
-            const isWhiteTurn = (currentMoveIndex % 2 === 0);
-            worker.currentPerspective = isWhiteTurn ? 1 : -1;
-
-            // 2. Construct Position Strings
-            let movesString = "position startpos moves";
-            for(let j=0; j < currentMoveIndex; j++) { 
-                const m = history[j];
-                movesString += " " + m.from + m.to + (m.promotion || '');
-            }
-
-            const playedMoveObj = history[currentMoveIndex];
-            const playedMoveLAN = playedMoveObj.from + playedMoveObj.to + (playedMoveObj.promotion || '');
-            worker.currentPlayedMoveLAN = playedMoveLAN;
-
-            // 3. Execute Phase Logic
-            if (searchPhase === 'classical') {
-                // --- PHASE 1: CLASSICAL TRACE ---
-                worker.postMessage('setoption name Use NNUE value false');
-                worker.postMessage(movesString);
-                worker.postMessage('eval'); 
-                worker.postMessage('go nodes 1'); // Dummy search to trigger 'bestmove'
-
-            } else if (searchPhase === 'nnue_best') {
-                // --- PHASE 2: NNUE TOP 3 LINES ---
-                worker.postMessage('setoption name Use NNUE value true');
-                worker.postMessage('setoption name MultiPV value 3'); // Look for top 3
-                worker.postMessage(movesString);
-                worker.postMessage(`go depth ${SEARCH_DEPTH}`); // Search ALL moves
-
-            } else if (searchPhase === 'nnue_played') {
-                // --- PHASE 3: NNUE PLAYED MOVE ---
-                worker.postMessage('setoption name MultiPV value 1'); // Reset to single line
-                worker.postMessage(movesString);
-                // Restrict search ONLY to the played move to get its specific score
-                worker.postMessage(`go depth ${SEARCH_DEPTH} searchmoves ${playedMoveLAN}`); 
-            }
-        };
-
-        worker.onmessage = (e) => {
-            const msg = e.data;
-            
-            // 1. Capture Classical Trace (Non-standard lines)
-            if (searchPhase === 'classical') {
-                if (!msg.startsWith('info') && !msg.startsWith('bestmove') && !msg.startsWith('option')) {
-                    worker.traceBuffer += msg + "\n";
+            const processNextStep = () => {
+                if (currentMoveIndex >= history.length) {
+                    worker.onmessage = null; 
+                    resolve(analysisData);
+                    return;
                 }
-            }
-
-            // 2. Parse Scores (Standard UCI)
-            if (msg.startsWith('info') && msg.includes('score') && msg.includes('pv')) {
-                let multipv = 1;
-                const pvMatch = msg.match(/multipv (\d+)/);
-                if (pvMatch) multipv = parseInt(pvMatch[1]);
-
-                let score = 0;
-                if(msg.includes('cp')) {
-                    const match = msg.match(/cp (-?\d+)/);
-                    if(match) score = parseInt(match[1]);
-                } else if (msg.includes('mate')) {
-                    const match = msg.match(/mate (-?\d+)/);
-                    if(match) score = parseInt(match[1]) > 0 ? 2000 : -2000;
-                }
-
-                // Adjust for perspective so it's always "Player's Advantage"
-                score = score * worker.currentPerspective;
-
-                // Extract the move string (LAN)
-                const pvIndex = msg.indexOf(' pv ');
-                let bestMoveLan = "";
-                if (pvIndex !== -1) {
-                     bestMoveLan = msg.substring(pvIndex + 4).split(' ')[0];
-                }
-
-                if (!worker.currentLines) worker.currentLines = {};
-                worker.currentLines[multipv] = {
-                    rank: multipv,
-                    score: score,
-                    move: bestMoveLan
-                };
-            }
-            
-            // 3. Handle End of Search
-            if (msg.startsWith('bestmove')) {
                 
-                if (searchPhase === 'classical') {
-                    // Save Trace -> Go to NNUE Best
-                    currentClassicalTrace = worker.traceBuffer;
-                    searchPhase = 'nnue_best';
-                    processNextStep();
+                worker.currentLines = {}; 
+                worker.traceBuffer = ""; 
+                const isWhiteTurn = (currentMoveIndex % 2 === 0);
+                worker.currentPerspective = isWhiteTurn ? 1 : -1;
 
-                } else if (searchPhase === 'nnue_best') {
-                    // Save Top 3 Lines -> Go to NNUE Played
-                    currentTopLines = Object.values(worker.currentLines || [])
-                        .sort((a,b) => a.rank - b.rank) // Ensure order 1, 2, 3
-                        .slice(0, 3); // Safety clip
-
-                    searchPhase = 'nnue_played';
-                    processNextStep();
-
-                } else if (searchPhase === 'nnue_played') {
-                    // Save Played Score -> Commit Data -> Next Move
-                    const lines = Object.values(worker.currentLines || {});
-                    const playedScore = (lines.length > 0) ? lines[0].score : null;
-
-                    analysisData.push({
-                        move_number: currentMoveIndex + 1,
-                        played_move: worker.currentPlayedMoveLAN,
-                        played_eval: playedScore,          // REQUIREMENT 1
-                        top_lines: currentTopLines,        // REQUIREMENT 2
-                        static_trace: currentClassicalTrace // TRACE
-                    });
-
-                    // Reset variables for next move
-                    searchPhase = 'classical';
-                    currentClassicalTrace = null;
-                    currentTopLines = [];
-                    currentMoveIndex++;
-                    processNextStep();
+                let movesString = "position startpos moves";
+                for(let j=0; j < currentMoveIndex; j++) { 
+                    const m = history[j];
+                    movesString += " " + m.from + m.to + (m.promotion || '');
                 }
-            }
-        };
 
-        processNextStep();
-    });
-}
+                const playedMoveObj = history[currentMoveIndex];
+                const playedMoveLAN = playedMoveObj.from + playedMoveObj.to + (playedMoveObj.promotion || '');
+                worker.currentPlayedMoveLAN = playedMoveLAN;
 
-    // --- UI Updaters (Standard) ---
+                if (searchPhase === 'classical') {
+                    worker.postMessage('setoption name Use NNUE value false');
+                    worker.postMessage(movesString);
+                    worker.postMessage('eval'); 
+                    worker.postMessage('go nodes 1'); 
+                } else if (searchPhase === 'nnue_best') {
+                    worker.postMessage('setoption name Use NNUE value true');
+                    worker.postMessage('setoption name MultiPV value 3'); 
+                    worker.postMessage(movesString);
+                    worker.postMessage(`go depth ${SEARCH_DEPTH}`); 
+                } else if (searchPhase === 'nnue_played') {
+                    worker.postMessage('setoption name MultiPV value 1'); 
+                    worker.postMessage(movesString);
+                    worker.postMessage(`go depth ${SEARCH_DEPTH} searchmoves ${playedMoveLAN}`); 
+                }
+            };
+
+            worker.onmessage = (e) => {
+                const msg = e.data;
+                if (typeof msg !== 'string') return;
+
+                if (searchPhase === 'classical') {
+                    if (!msg.startsWith('info') && !msg.startsWith('bestmove') && !msg.startsWith('option')) {
+                        worker.traceBuffer += msg + "\n";
+                    }
+                }
+
+                if (msg.startsWith('info') && msg.includes('score') && msg.includes('pv')) {
+                    let multipv = 1;
+                    const pvMatch = msg.match(/multipv (\d+)/);
+                    if (pvMatch) multipv = parseInt(pvMatch[1]);
+
+                    let score = 0;
+                    if(msg.includes('cp')) {
+                        const match = msg.match(/cp (-?\d+)/);
+                        if(match) score = parseInt(match[1]);
+                    } else if (msg.includes('mate')) {
+                        const match = msg.match(/mate (-?\d+)/);
+                        if(match) score = parseInt(match[1]) > 0 ? 2000 : -2000;
+                    }
+                    score = score * worker.currentPerspective;
+
+                    const pvIndex = msg.indexOf(' pv ');
+                    let bestMoveLan = "";
+                    if (pvIndex !== -1) {
+                        bestMoveLan = msg.substring(pvIndex + 4).split(' ')[0];
+                    }
+
+                    if (!worker.currentLines) worker.currentLines = {};
+                    worker.currentLines[multipv] = { rank: multipv, score: score, move: bestMoveLan };
+                }
+                
+                if (msg.startsWith('bestmove')) {
+                    if (searchPhase === 'classical') {
+                        currentClassicalTrace = worker.traceBuffer;
+                        searchPhase = 'nnue_best';
+                        processNextStep();
+                    } else if (searchPhase === 'nnue_best') {
+                        currentTopLines = Object.values(worker.currentLines || [])
+                            .sort((a,b) => a.rank - b.rank).slice(0, 3);
+                        searchPhase = 'nnue_played';
+                        processNextStep();
+                    } else if (searchPhase === 'nnue_played') {
+                        const lines = Object.values(worker.currentLines || {});
+                        const playedScore = (lines.length > 0) ? lines[0].score : null;
+                        analysisData.push({
+                            move_number: currentMoveIndex + 1,
+                            played_move: worker.currentPlayedMoveLAN,
+                            played_eval: playedScore,
+                            top_lines: currentTopLines,
+                            static_trace: currentClassicalTrace
+                        });
+                        searchPhase = 'classical';
+                        currentClassicalTrace = null;
+                        currentTopLines = [];
+                        currentMoveIndex++;
+                        processNextStep();
+                    }
+                }
+            };
+            processNextStep();
+        });
+    }
 
     function updateCardUI(data) {
+        if (!data || !data.username) return;
         const card = document.getElementById('player-card');
-        card.className = `royal-shape select-none theme-${data.theme}`;
-        document.getElementById('overall-score').innerText = data.overall;
-        document.getElementById('player-username').innerText = data.username;
+        if(card) card.className = `royal-shape select-none theme-${data.theme}`;
         
-        const img = document.getElementById('player-img');
-        if (!img.getAttribute('data-custom')) img.src = proxy(data.avatar);
+        ['overall-score', 'player-username'].forEach(id => {
+            const el = document.getElementById(id);
+            if(el) el.textContent = data[id === 'player-username' ? 'username' : 'overall'];
+        });
 
-        const rawFlagUrl = data.country_code !== 'xx' 
-            ? `https://flagcdn.com/w40/${data.country_code.toLowerCase()}.png`
-            : 'https://flagcdn.com/w40/un.png';
-        document.getElementById('country-flag').src = proxy(rawFlagUrl);
+        const img = document.getElementById('player-img');
+        if (img && !img.getAttribute('data-custom')) img.src = proxy(data.avatar);
+
+        const flag = document.getElementById('country-flag');
+        if (flag) {
+            flag.src = proxy(data.country_code !== 'xx' 
+                ? `https://flagcdn.com/w40/${data.country_code.toLowerCase()}.png`
+                : 'https://flagcdn.com/w40/un.png');
+        }
 
         const badge = document.getElementById('title-badge');
-        if (data.title) {
-            badge.innerText = data.title;
-            badge.classList.remove('hidden');
-            badge.classList.add('inline-block');
-        } else {
-            badge.classList.add('hidden');
+        if (badge) {
+            badge.textContent = data.title || '';
+            badge.classList.toggle('hidden', !data.title);
+            badge.classList.toggle('inline-block', !!data.title);
         }
-        document.getElementById('rating-rapid').innerText = data.ratings.rapid;
-        document.getElementById('rating-blitz').innerText = data.ratings.blitz;
-        document.getElementById('rating-bullet').innerText = data.ratings.bullet;
+
+        ['rapid', 'blitz', 'bullet'].forEach(type => {
+            const el = document.getElementById(`rating-${type}`);
+            if(el) el.textContent = data.ratings[type] || '---';
+        });
     }
 
     function updateCardMetrics(data) {
-        document.getElementById('overall-score').innerText = data.overall;
-        if(data.description) document.getElementById('player-description').innerText = data.description;
+        if (!data) return;
+        const overallEl = document.getElementById('overall-score');
+        if(overallEl) overallEl.textContent = data.overall;
+        
+        const descEl = document.getElementById('player-description');
+        if(descEl && data.description) descEl.textContent = data.description;
 
         const container = document.getElementById('metrics-container');
+        if (!container) return;
+
         container.innerHTML = ''; 
-        
         Object.entries(data.metrics).forEach(([key, value]) => {
             const row = document.createElement('div');
             row.className = 'metric-row';
-            row.innerHTML = `
-                <span class="metric-name">${key}</span>
-                <div class="metric-bar-bg"><div class="metric-bar-fill" style="width: ${value}%"></div></div>
-                <span class="metric-value">${value}</span>
-            `;
+            
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'metric-name';
+            nameSpan.textContent = key;
+            
+            const barBg = document.createElement('div');
+            barBg.className = 'metric-bar-bg';
+            
+            const barFill = document.createElement('div');
+            barFill.className = 'metric-bar-fill';
+            barFill.style.width = `${value}%`;
+            
+            const valSpan = document.createElement('span');
+            valSpan.className = 'metric-value';
+            valSpan.textContent = value;
+            
+            barBg.appendChild(barFill);
+            row.appendChild(nameSpan);
+            row.appendChild(barBg);
+            row.appendChild(valSpan);
             container.appendChild(row);
         });
     }
@@ -579,8 +594,10 @@ function analyzeGameDualMode(pgn, worker) {
             const reader = new FileReader();
             reader.onload = function(e) {
                 const img = document.getElementById('player-img');
-                img.src = e.target.result;
-                img.setAttribute('data-custom', 'true');
+                if (img) {
+                    img.src = e.target.result;
+                    img.setAttribute('data-custom', 'true');
+                }
             }
             reader.readAsDataURL(input.files[0]);
         }
@@ -588,6 +605,9 @@ function analyzeGameDualMode(pgn, worker) {
 
     function downloadCard() {
         const card = document.getElementById('player-card');
+        const usernameEl = document.getElementById('player-username');
+        if (!card || !usernameEl) return;
+
         const originalTransform = card.style.transform;
         card.style.transform = 'none';
         card.style.boxShadow = 'none';
@@ -596,13 +616,13 @@ function analyzeGameDualMode(pgn, worker) {
             scale: 2, backgroundColor: null, useCORS: true, allowTaint: true
         }).then(canvas => {
             const link = document.createElement('a');
-            link.download = `chess-card-${document.getElementById('player-username').innerText}.png`;
+            link.download = `chess-card-${usernameEl.textContent}.png`;
             link.href = canvas.toDataURL();
             link.click();
             card.style.transform = originalTransform;
             card.style.boxShadow = '';
         });
     }
-    </script>
+</script>
 </body>
 </html>
