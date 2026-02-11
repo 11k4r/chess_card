@@ -1,29 +1,41 @@
 import io
-import math
-import statistics
-import re
 import chess.pgn
-
 
 def get_user_color(game_data):
     """
     Determines if the 'username' in the data object played White or Black.
-    Returns 'white', 'black', or None if not found.
+    Uses the python-chess library for robust PGN parsing.
+    
+    :param game_data: Dictionary containing 'username' and 'pgn'
+    :return: 'white', 'black', or None
     """
     target_user = game_data.get('username')
-    pgn = game_data.get('pgn', '')
+    pgn_str = game_data.get('pgn', '')
 
-    # regex to find player names in PGN tags like [White "PlayerName"]
-    white_match = re.search(r'\[White "(.*?)"\]', pgn)
-    black_match = re.search(r'\[Black "(.*?)"\]', pgn)
+    if not target_user or not pgn_str:
+        return None
 
-    white_player = white_match.group(1) if white_match else None
-    black_player = black_match.group(1) if black_match else None
+    try:
+        # Fast parse of headers only
+        pgn_io = io.StringIO(pgn_str)
+        headers = chess.pgn.read_headers(pgn_io)
+        
+        if not headers:
+            return None
 
-    # Case insensitive comparison is often safer
-    if target_user and white_player and target_user.lower() == white_player.lower():
-        return 'white'
-    elif target_user and black_player and target_user.lower() == black_player.lower():
-        return 'black'
+        white_player = headers.get("White", "")
+        black_player = headers.get("Black", "")
+
+        # Normalize strings for comparison
+        target_user = target_user.strip().lower()
+        
+        if white_player.strip().lower() == target_user:
+            return 'white'
+        elif black_player.strip().lower() == target_user:
+            return 'black'
+            
+    except Exception as e:
+        print(f"Error parsing PGN headers: {e}")
+        return None
     
     return None
