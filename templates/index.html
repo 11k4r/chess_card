@@ -279,8 +279,8 @@
     // --- STATE MANAGEMENT ---
     let workerPool = [];
 
-    // --- WORKER FACTORY ---
-    function createStockfishWorker() {
+    function createClassicalWorker() {
+        // The old Stockfish 11 engine needs this module wrapper to function
         const baseUrl = new URL('/static/package/', window.location.href).href;
         const scriptUrl = baseUrl + 'stockfish.js'; 
 
@@ -290,7 +290,7 @@
                     if (path.indexOf('http') === 0) return path;
                     return '${baseUrl}' + path;
                 },
-                mainScriptUrlOrBlob: '${scriptUrl}'
+                mainScriptUrlOrBlob: '${scriptUrl}' // <--- THIS WAS MISSING
             };
             
             var pendingMessages = [];
@@ -306,21 +306,27 @@
 
             importScripts('${scriptUrl}');
 
-            Stockfish(Module).then(sf => {
-                engineInstance = sf;
-                sf.addMessageListener(function(line) {
-                    self.postMessage(line);
-                });
-                while (pendingMessages.length > 0) {
-                    sf.postMessage(pendingMessages.shift());
-                }
-            }).catch(err => {
-                console.error("Worker Error:", err);
-            });
+            if (typeof Stockfish !== 'undefined') {
+                Stockfish(Module).then(sf => {
+                    engineInstance = sf;
+                    sf.addMessageListener(function(line) {
+                        self.postMessage(line);
+                    });
+                    while (pendingMessages.length > 0) {
+                        sf.postMessage(pendingMessages.shift());
+                    }
+                }).catch(err => console.error(err));
+            }
         `;
 
         const blob = new Blob([workerSource], { type: 'application/javascript' });
         return new Worker(URL.createObjectURL(blob));
+    }
+
+    function createDeepWorker() {
+        // Modern Stockfish 17.1 handles its own internal paths and auto-initializes 
+        // when spawned directly as a Worker. This prevents Blob URL path corruption.
+        return new Worker('/static/stockfish.js');
     }
 
     // --- UI HELPERS ---
@@ -384,14 +390,21 @@
 
             // 3. Initialize Workers
             if (workerPool.length === 0) {
-                console.log(`Initializing pool with ${THREAD_COUNT} workers...`);
+                console.log(`Initializing pool with ${THREAD_COUNT} worker pairs...`);
                 for (let i = 0; i < THREAD_COUNT; i++) {
-                    const w = createStockfishWorker(); 
-                    w.postMessage('uci');
-                    w.postMessage('setoption name Threads value 1'); 
-                    w.postMessage('setoption name Hash value 16');
-                    w.postMessage('setoption name MultiPV value 3'); 
-                    workerPool.push(w);
+                    
+                    // 1. Classical Engine (via legacy Blob loader)
+                    const wClassical = createClassicalWorker(); 
+                    wClassical.postMessage('uci');
+                    wClassical.postMessage('setoption name Use NNUE value false');
+                    
+                    // 2. Deep Engine (via direct Worker loader)
+                    const wDeep = createDeepWorker();
+                    wDeep.postMessage('uci');
+                    wDeep.postMessage('setoption name Threads value 1'); 
+                    wDeep.postMessage('setoption name Hash value 16');
+                    
+                    workerPool.push({ classical: wClassical, deep: wDeep });
                 }
             }
 
@@ -472,13 +485,13 @@
         let gamesCompleted = 0;
         let totalGames = games.length;
 
-        const workerTask = async (worker) => {
+        const workerTask = async (workerPair) => {
             while (gamesQueue.length > 0) {
                 const game = gamesQueue.shift(); 
                 if (!game) break; 
 
                 try {
-                    const analysisData = await analyzeGameDualMode(game.pgn, worker);
+                    const analysisData = await analyzeGameDualMode(game.pgn, workerPair);
                     
                     // Note: No 'is_final' flag here anymore
                     const payload = {
@@ -509,7 +522,7 @@
         await Promise.all(workerPool.map(w => workerTask(w)));
     }
 
-    function analyzeGameDualMode(pgn, worker) {
+    function analyzeGameDualMode(pgn, workerPair) {
         return new Promise((resolve) => {
             const chess = new Chess();
             try {
@@ -523,21 +536,27 @@
             let currentClassicalTrace = null;
             let currentTopLines = [];
 
-            // Reset
-            worker.currentLines = {};
-            worker.traceBuffer = ""; 
+            // Local state 
+            let currentLines = {};
+            let traceBuffer = "";
+            let currentPerspective = 1;
+            let currentPlayedMoveLAN = "";
+
+            const classicalWorker = workerPair.classical;
+            const deepWorker = workerPair.deep;
 
             const processNextStep = () => {
                 if (currentMoveIndex >= history.length) {
-                    worker.onmessage = null; 
+                    classicalWorker.onmessage = null; 
+                    deepWorker.onmessage = null;
                     resolve(analysisData);
                     return;
                 }
                 
-                worker.currentLines = {}; 
-                worker.traceBuffer = ""; 
+                currentLines = {}; 
+                traceBuffer = ""; 
                 const isWhiteTurn = (currentMoveIndex % 2 === 0);
-                worker.currentPerspective = isWhiteTurn ? 1 : -1;
+                currentPerspective = isWhiteTurn ? 1 : -1;
 
                 let movesString = "position startpos moves";
                 for(let j=0; j < currentMoveIndex; j++) { 
@@ -546,89 +565,100 @@
                 }
 
                 const playedMoveObj = history[currentMoveIndex];
-                const playedMoveLAN = playedMoveObj.from + playedMoveObj.to + (playedMoveObj.promotion || '');
-                worker.currentPlayedMoveLAN = playedMoveLAN;
+                currentPlayedMoveLAN = playedMoveObj.from + playedMoveObj.to + (playedMoveObj.promotion || '');
 
                 if (searchPhase === 'classical') {
-                    worker.postMessage('setoption name Use NNUE value false');
-                    worker.postMessage(movesString);
-                    worker.postMessage('eval'); 
-                    worker.postMessage('go nodes 1'); 
+                    // Route to old engine, NNUE is disabled by default via init
+                    classicalWorker.postMessage(movesString);
+                    classicalWorker.postMessage('eval'); 
+                    classicalWorker.postMessage('go nodes 1'); 
                 } else if (searchPhase === 'nnue_best') {
-                    worker.postMessage('setoption name Use NNUE value true');
-                    worker.postMessage('setoption name MultiPV value 3'); 
-                    worker.postMessage(movesString);
-                    worker.postMessage(`go depth ${SEARCH_DEPTH}`); 
+                    // Route to SF 17.1
+                    deepWorker.postMessage('setoption name MultiPV value 3'); 
+                    deepWorker.postMessage(movesString);
+                    deepWorker.postMessage(`go depth ${SEARCH_DEPTH}`); 
                 } else if (searchPhase === 'nnue_played') {
-                    worker.postMessage('setoption name MultiPV value 1'); 
-                    worker.postMessage(movesString);
-                    worker.postMessage(`go depth ${SEARCH_DEPTH} searchmoves ${playedMoveLAN}`); 
+                    // Route to SF 17.1
+                    deepWorker.postMessage('setoption name MultiPV value 1'); 
+                    deepWorker.postMessage(movesString);
+                    deepWorker.postMessage(`go depth ${SEARCH_DEPTH} searchmoves ${currentPlayedMoveLAN}`); 
                 }
             };
 
-            worker.onmessage = (e) => {
+            // Listener for Classical Engine
+            classicalWorker.onmessage = (e) => {
                 const msg = e.data;
                 if (typeof msg !== 'string') return;
 
                 if (searchPhase === 'classical') {
                     if (!msg.startsWith('info') && !msg.startsWith('bestmove') && !msg.startsWith('option')) {
-                        worker.traceBuffer += msg + "\n";
-                    }
-                }
-
-                if (msg.startsWith('info') && msg.includes('score') && msg.includes('pv')) {
-                    let multipv = 1;
-                    const pvMatch = msg.match(/multipv (\d+)/);
-                    if (pvMatch) multipv = parseInt(pvMatch[1]);
-
-                    let score = 0;
-                    if(msg.includes('cp')) {
-                        const match = msg.match(/cp (-?\d+)/);
-                        if(match) score = parseInt(match[1]);
-                    } else if (msg.includes('mate')) {
-                        const match = msg.match(/mate (-?\d+)/);
-                        if(match) score = parseInt(match[1]) > 0 ? 2000 : -2000;
-                    }
-                    score = score * worker.currentPerspective;
-
-                    const pvIndex = msg.indexOf(' pv ');
-                    let bestMoveLan = "";
-                    if (pvIndex !== -1) {
-                        bestMoveLan = msg.substring(pvIndex + 4).split(' ')[0];
+                        traceBuffer += msg + "\n";
                     }
 
-                    if (!worker.currentLines) worker.currentLines = {};
-                    worker.currentLines[multipv] = { rank: multipv, score: score, move: bestMoveLan };
-                }
-                
-                if (msg.startsWith('bestmove')) {
-                    if (searchPhase === 'classical') {
-                        currentClassicalTrace = worker.traceBuffer;
+                    if (msg.startsWith('bestmove')) {
+                        currentClassicalTrace = traceBuffer;
                         searchPhase = 'nnue_best';
-                        processNextStep();
-                    } else if (searchPhase === 'nnue_best') {
-                        currentTopLines = Object.values(worker.currentLines || [])
-                            .sort((a,b) => a.rank - b.rank).slice(0, 3);
-                        searchPhase = 'nnue_played';
-                        processNextStep();
-                    } else if (searchPhase === 'nnue_played') {
-                        const lines = Object.values(worker.currentLines || {});
-                        const playedScore = (lines.length > 0) ? lines[0].score : null;
-                        analysisData.push({
-                            move_number: currentMoveIndex + 1,
-                            played_move: worker.currentPlayedMoveLAN,
-                            played_eval: playedScore,
-                            top_lines: currentTopLines,
-                            static_trace: currentClassicalTrace
-                        });
-                        searchPhase = 'classical';
-                        currentClassicalTrace = null;
-                        currentTopLines = [];
-                        currentMoveIndex++;
                         processNextStep();
                     }
                 }
             };
+
+            // Listener for 17.1 Deep Engine
+            deepWorker.onmessage = (e) => {
+                const msg = e.data;
+                if (typeof msg !== 'string') return;
+
+                if (searchPhase === 'nnue_best' || searchPhase === 'nnue_played') {
+                    if (msg.startsWith('info') && msg.includes('score') && msg.includes('pv')) {
+                        let multipv = 1;
+                        const pvMatch = msg.match(/multipv (\d+)/);
+                        if (pvMatch) multipv = parseInt(pvMatch[1]);
+
+                        let score = 0;
+                        if(msg.includes('cp')) {
+                            const match = msg.match(/cp (-?\d+)/);
+                            if(match) score = parseInt(match[1]);
+                        } else if (msg.includes('mate')) {
+                            const match = msg.match(/mate (-?\d+)/);
+                            if(match) score = parseInt(match[1]) > 0 ? 2000 : -2000;
+                        }
+                        score = score * currentPerspective;
+
+                        const pvIndex = msg.indexOf(' pv ');
+                        let bestMoveLan = "";
+                        if (pvIndex !== -1) {
+                            bestMoveLan = msg.substring(pvIndex + 4).split(' ')[0];
+                        }
+
+                        currentLines[multipv] = { rank: multipv, score: score, move: bestMoveLan };
+                    }
+                    
+                    if (msg.startsWith('bestmove')) {
+                        if (searchPhase === 'nnue_best') {
+                            currentTopLines = Object.values(currentLines)
+                                .sort((a,b) => a.rank - b.rank).slice(0, 3);
+                            searchPhase = 'nnue_played';
+                            processNextStep();
+                        } else if (searchPhase === 'nnue_played') {
+                            const lines = Object.values(currentLines);
+                            const playedScore = (lines.length > 0) ? lines[0].score : null;
+                            analysisData.push({
+                                move_number: currentMoveIndex + 1,
+                                played_move: currentPlayedMoveLAN,
+                                played_eval: playedScore,
+                                top_lines: currentTopLines,
+                                static_trace: currentClassicalTrace
+                            });
+                            searchPhase = 'classical';
+                            currentClassicalTrace = null;
+                            currentTopLines = [];
+                            currentMoveIndex++;
+                            processNextStep();
+                        }
+                    }
+                }
+            };
+
             processNextStep();
         });
     }
